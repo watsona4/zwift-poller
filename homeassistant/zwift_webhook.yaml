@@ -16,7 +16,7 @@
 
 # Webhook trigger automation that fires events
 automation:
-  - id: zwift_webhook_handler
+  - id: f29a831e-07c3-4e54-8ac7-72865d1edf47
     alias: "Zwift: Webhook Handler"
     mode: queued
     max: 10
@@ -68,7 +68,7 @@ utility_meter:
 
 # Accumulate minutes when ride ends
 automation zwift_accumulate:
-  - id: zwift_accumulate_minutes_on_ride_end
+  - id: dc4c589b-d3df-44fc-9f63-a9afc7610ad5
     alias: "Zwift: Accumulate minutes on ride end"
     trigger:
       - platform: state
