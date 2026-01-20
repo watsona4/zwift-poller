@@ -1,0 +1,307 @@
+# =============================================================================
+# Zwift Webhook Package
+# =============================================================================
+# This package consumes webhooks from the external zwift-poller container.
+# All API polling is handled externally - this just defines sensors that
+# receive the webhook data.
+#
+# Setup:
+# 1. Generate a webhook ID and add to secrets.yaml:
+#    zwift_webhook_id: "your-random-webhook-id-here"
+#
+# 2. Configure the zwift-poller container with:
+#    ZWIFT_HA_WEBHOOK_ID=your-random-webhook-id-here
+#
+# =============================================================================
+
+# Webhook trigger automation that fires events
+automation:
+  - id: zwift_webhook_handler
+    alias: "Zwift: Webhook Handler"
+    mode: queued
+    max: 10
+    trigger:
+      - platform: webhook
+        webhook_id: !secret zwift_webhook_id
+        allowed_methods:
+          - POST
+        local_only: true
+    variables:
+      event_type: "{{ trigger.json.event_type }}"
+      data: "{{ trigger.json.data }}"
+    action:
+      - event: "{{ event_type }}"
+        event_data:
+          data: "{{ data }}"
+
+# Accumulated ride minutes (preserved across restarts)
+input_number:
+  zwift_ride_minutes_total:
+    name: "Zwift Ride Minutes Total"
+    min: 0
+    max: 100000
+    step: 0.1
+
+utility_meter:
+  zwift_weekly_minutes:
+    unique_id: 992c9a70-0bce-4601-add4-8b64fdd20230
+    source: sensor.zwift_ride_minutes_total
+    cycle: weekly
+
+# Accumulate minutes when ride ends
+automation zwift_accumulate:
+  - id: zwift_accumulate_minutes_on_ride_end
+    alias: "Zwift: Accumulate minutes on ride end"
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.zwift_online
+        from: "on"
+        to: "off"
+    variables:
+      minutes: "{{ states('sensor.zwift_last_ride_duration')|float(0) }}"
+    action:
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.zwift_ride_minutes_total
+        data:
+          value: >
+            {{ (states('input_number.zwift_ride_minutes_total')|float(0) + minutes)|float(0)|round(1) }}
+
+template:
+  # Ride minutes total sensor
+  - sensor:
+      - name: "Zwift Ride Minutes Total"
+        unique_id: a97f032a-7135-4c25-a1b8-160aed7f824e
+        unit_of_measurement: "min"
+        state: "{{ states('input_number.zwift_ride_minutes_total')|float(0) }}"
+
+  # Online status from webhook
+  - trigger:
+      - platform: event
+        event_type: zwift_status_update
+    binary_sensor:
+      - name: "Zwift Online"
+        unique_id: 04f86a63-28eb-456e-a19e-4470d3f577ae
+        device_class: connectivity
+        icon: "mdi:radio-tower"
+        state: "{{ trigger.event.data.data.online | default(false) }}"
+        attributes:
+          world_id: "{{ trigger.event.data.data.world_id }}"
+
+  # Profile data from webhook
+  - trigger:
+      - platform: event
+        event_type: zwift_profile_update
+    variables:
+      d: "{{ trigger.event.data.data if trigger.event.data.data is mapping else {} }}"
+    sensor:
+      - name: "Zwift Profile Data"
+        unique_id: bf52126e-b555-4441-91b3-a73b44500af7
+        state: "{{ now() }}"
+        attributes:
+          id: "{{ d.get('id')|int(none) }}"
+          first_name: "{{ d.get('firstName') }}"
+          last_name: "{{ d.get('lastName') }}"
+          use_metric: "{{ d.get('useMetric')|bool(none) }}"
+          riding: "{{ d.get('riding')|bool(none) }}"
+          achievement_level: "{{ d.get('achievementLevel')|int(none) }}"
+          ftp: "{{ d.get('ftp')|int(none) }}"
+          height: "{{ d.get('height')|int(none) }}"
+          weight: "{{ d.get('weight')|int(none) }}"
+          total_distance: "{{ d.get('totalDistance')|int(none) }}"
+          total_distance_climbed: "{{ d.get('totalDistanceClimbed')|int(none) }}"
+          total_experience_points: "{{ d.get('totalExperiencePoints')|int(none) }}"
+          total_time_in_minutes: "{{ d.get('totalTimeInMinutes')|int(none) }}"
+          total_watt_hours: "{{ d.get('totalWattHours')|int(none) }}"
+          world_id: "{{ d.get('worldId')|int(none) }}"
+
+  # Activities data from webhook
+  - trigger:
+      - platform: event
+        event_type: zwift_activities_update
+    variables:
+      d: "{{ trigger.event.data.data if trigger.event.data.data is sequence else [] }}"
+      last: "{{ d | first if d else {} }}"
+      now_ts: "{{ as_timestamp(now()) }}"
+      ride_events_json: >-
+        {% set ns = namespace(items=[]) %}
+        {% for ac in d %}
+          {% set sport = (ac.get('sport') or ac.get('activityType') or '')|string|lower %}
+          {% if 'ride' in sport or sport in ['cycling', 'bike'] %}
+            {% set raw_ts = ac.get('startDate') or ac.get('eventStart') %}
+            {% if raw_ts %}
+              {% set ts = as_timestamp(raw_ts) if raw_ts is string else (raw_ts / 1000 if raw_ts > 1000000000000 else raw_ts) %}
+              {% set moving_sec = (ac.get('movingTimeInMs')|float(0)) / 1000 %}
+              {% if moving_sec <= 0 %}
+                {% set moving_sec = ac.get('durationInSeconds')|float(0) %}
+              {% endif %}
+              {% set distance_m = ac.get('distanceInMeters')|float(0) %}
+              {% set elev_m = ac.get('totalElevation')|float(0) %}
+              {% set ns.items = ns.items + [{'ts': ts, 'sec': moving_sec, 'dist_m': distance_m, 'elev_m': elev_m}] %}
+            {% endif %}
+          {% endif %}
+        {% endfor %}
+        {{ ns.items | tojson }}
+      ride_events: "{{ ride_events_json | from_json }}"
+      week_start_ts: "{{ as_timestamp(now().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=now().weekday())) }}"
+      week_end_ts: "{{ week_start_ts | float + 7*24*3600 }}"
+      start_7d_ts: "{{ now_ts - 7*24*3600 }}"
+      week_totals: >-
+        {% set ns = namespace(rides=0, sec=0.0, mi=0.0, ft=0.0) %}
+        {% for ride in ride_events %}
+          {% set ts = ride['ts'] %}
+          {% if ts is number and week_start_ts | float <= ts < week_end_ts | float %}
+            {% set ns.rides = ns.rides + 1 %}
+            {% set ns.sec = ns.sec + ride['sec']|float(0) %}
+            {% set ns.mi = ns.mi + ride['dist_m']|float(0) * 0.000621371 %}
+            {% set ns.ft = ns.ft + ride['elev_m']|float(0) * 3.28084 %}
+          {% endif %}
+        {% endfor %}
+        {{ {'rides': ns.rides, 'sec': ns.sec, 'mi': ns.mi, 'ft': ns.ft} }}
+      load_7d_sec: >-
+        {% set total = namespace(sec=0.0) %}
+        {% for ride in ride_events %}
+          {% set ts = ride['ts'] %}
+          {% if ts is number and start_7d_ts <= ts < now_ts %}
+            {% set total.sec = total.sec + ride['sec']|float(0) %}
+          {% endif %}
+        {% endfor %}
+        {{ total.sec }}
+    sensor:
+      - name: "Zwift Activity Data"
+        unique_id: 0706169f-d159-4c09-a93d-f995b94550d0
+        state: "{{ now() }}"
+        attributes:
+          activities: "{{ d }}"
+      - name: "Ride Training Summary (This Week)"
+        unique_id: 8f684f4b-8f0b-4df5-a3b0-e16173f4d903
+        icon: "mdi:bike"
+        state: "{{ now().isoformat() }}"
+        attributes:
+          rides: "{{ week_totals.rides }}"
+          week_hours: "{{ (week_totals.sec | float(0) / 3600) | round(2) }}"
+          week_miles: "{{ (week_totals.mi | float(0)) | round(1) }}"
+          week_elev_ft: "{{ (week_totals.ft | float(0)) | round(0) }}"
+          load_7d_hours: "{{ (load_7d_sec | float(0) / 3600) | round(2) }}"
+      - name: "Ride Training Load (7d Hours)"
+        unique_id: 8a72c3e7-5388-4af1-bae7-775363ad9b3d
+        unit_of_measurement: "h"
+        device_class: duration
+        state_class: measurement
+        icon: "mdi:bike"
+        state: "{{ (load_7d_sec | float(0) / 3600) | round(2) }}"
+      - name: "Zwift Last Ride Title"
+        unique_id: 221a86fb-2af5-40f3-aa32-81ed893e044e
+        state: "{{ last.get('name','') if last else '' }}"
+      - name: "Zwift Last Ride Distance"
+        unique_id: 2ec53f50-fed2-45d1-ac6f-e769e9c07260
+        device_class: distance
+        unit_of_measurement: "mi"
+        state_class: measurement
+        state: "{{ (last.get('distanceInMeters',0)|float * 0.000621371)|round(2) if last else 0 }}"
+      - name: "Zwift Last Ride Elevation"
+        unique_id: 8952e7c9-e4e2-433e-bb0a-c1b29a52ecdf
+        device_class: distance
+        unit_of_measurement: "m"
+        state_class: measurement
+        state: "{{ last.get('totalElevation',0) if last else 0 }}"
+      - name: "Zwift Last Ride Avg Power"
+        unique_id: 6c8464a7-fd08-4ee0-bd84-6b0f1c250737
+        device_class: power
+        unit_of_measurement: "W"
+        state_class: measurement
+        state: "{{ last.get('avgWatts',0) if last else 0 }}"
+      - name: "Zwift Last Ride Duration"
+        unique_id: 14c3535b-4cbe-4c94-9168-d99be1ef090a
+        device_class: duration
+        unit_of_measurement: "min"
+        state_class: measurement
+        state: "{{ (last.get('movingTimeInMs',0)|float / 60000)|round(1) if last else 0 }}"
+      - name: "Zwift Last Ride Calories"
+        unique_id: 4666604b-0d9d-4237-a9bc-44e512ad2016
+        device_class: energy
+        unit_of_measurement: "kcal"
+        state_class: total
+        state: "{{ last.get('calories',0) if last else 0 }}"
+      - name: "Zwift Last Ride Image"
+        unique_id: 97cd09f5-ef2a-43f1-ba94-668a812b0420
+        state: "{{ last.get('primaryImageUrl','') if last else '' }}"
+
+  # World/live data from webhook (real-time ride metrics)
+  - trigger:
+      - platform: event
+        event_type: zwift_world_update
+    variables:
+      d: "{{ trigger.event.data.data if trigger.event.data.data is mapping else {} }}"
+    sensor:
+      - name: "Zwift World Data"
+        unique_id: 6053e751-1cfa-49bb-b325-c3fc0456b810
+        state: "{{ now() }}"
+        attributes:
+          player: "{{ d }}"
+      - name: "Zwift Heart Rate"
+        unique_id: 14176c53-5ffa-4f76-aea4-87435c28fbbf
+        unit_of_measurement: bpm
+        icon: "mdi:heart-pulse"
+        state: "{{ d.get('heartrate', 0) }}"
+      - name: "Zwift Speed"
+        unique_id: b8407534-6943-48ef-ba8a-f448b0a13fb5
+        unit_of_measurement: mph
+        icon: "mdi:speedometer"
+        state: "{{ d.get('speed_mph', 0) }}"
+      - name: "Zwift Cadence"
+        unique_id: 2f176570-b0f1-49e7-9da6-221d0d67475c
+        unit_of_measurement: rpm
+        icon: "mdi:rotate-right"
+        state: "{{ d.get('cadence', 0) }}"
+      - name: "Zwift Power"
+        unique_id: c969677b-8ab4-4ce8-a2b4-4aac6da9fc9f
+        unit_of_measurement: W
+        icon: "mdi:flash"
+        state: "{{ d.get('power', 0) }}"
+      - name: "Zwift Altitude"
+        unique_id: 88175b0f-9cb0-4205-8dd0-59ec5e7a6b2d
+        unit_of_measurement: ft
+        icon: "mdi:altimeter"
+        state: "{{ d.get('altitude_ft', 0) }}"
+      - name: "Zwift Distance"
+        unique_id: 4d18f9d9-f9a3-4594-a906-a89d6193f9d2
+        unit_of_measurement: miles
+        icon: "mdi:arrow-expand-horizontal"
+        state: "{{ d.get('distance_mi', 0) }}"
+      - name: "Zwift Gradient"
+        unique_id: af583603-1fc4-46cf-ae2e-888198b12a4f
+        unit_of_measurement: "%"
+        icon: "mdi:image-filter-hdr"
+        state: "{{ d.get('gradient', 0) }}"
+
+  # Derived sensors from profile
+  - sensor:
+      - name: "Zwift Level"
+        unique_id: 8621b878-0105-41f4-9f1a-f2bea550c60c
+        icon: "mdi:stairs"
+        state: "{{ state_attr('sensor.zwift_profile_data','achievement_level')|int(0) // 100 }}"
+      - name: "Zwift Cycle Progress"
+        unique_id: a41389ae-f2de-4d43-a530-71ca4845b3cd
+        unit_of_measurement: "%"
+        icon: "mdi:transfer-right"
+        state: "{{ state_attr('sensor.zwift_profile_data','achievement_level')|int(0) % 100 }}"
+
+# Weekly stats from history
+sensor:
+  - platform: history_stats
+    name: "Zwift Hours This Week"
+    unique_id: 4ce94855-c034-4afd-a52c-4b24580e1e8d
+    entity_id: binary_sensor.zwift_online
+    state: "on"
+    type: time
+    start: "{{ now().replace(hour=0,minute=0,second=0) - timedelta(days=now().weekday()) }}"
+    end: "{{ now() }}"
+  - platform: history_stats
+    name: "Zwift Rides This Week"
+    unique_id: 0011ce6d-7894-46c2-85be-78d74a94bf5d
+    entity_id: binary_sensor.zwift_online
+    state: "on"
+    type: count
+    start: "{{ now().replace(hour=0,minute=0,second=0) - timedelta(days=now().weekday()) }}"
+    end: "{{ now() }}"

@@ -1,0 +1,30 @@
+services:
+  zwift-poller:
+    build: .
+    container_name: zwift-poller
+    restart: unless-stopped
+    environment:
+      # Required
+      ZWIFT_USERNAME: ${ZWIFT_USERNAME}
+      ZWIFT_PASSWORD: ${ZWIFT_PASSWORD}
+      ZWIFT_PLAYER_ID: ${ZWIFT_PLAYER_ID}
+      ZWIFT_HA_WEBHOOK_ID: ${ZWIFT_HA_WEBHOOK_ID}
+      # Optional
+      ZWIFT_HA_URL: ${ZWIFT_HA_URL:-http://homeassistant:8123}
+      ZWIFT_HA_TOKEN: ${ZWIFT_HA_TOKEN:-}
+      ZWIFT_PROFILE_INTERVAL: ${ZWIFT_PROFILE_INTERVAL:-300}
+      ZWIFT_ACTIVITIES_INTERVAL: ${ZWIFT_ACTIVITIES_INTERVAL:-300}
+      ZWIFT_WORLD_INTERVAL: ${ZWIFT_WORLD_INTERVAL:-30}
+      ZWIFT_LOG_LEVEL: ${ZWIFT_LOG_LEVEL:-INFO}
+      ZWIFT_TOKEN_FILE: /data/tokens.json
+    volumes:
+      - zwift-data:/data
+    networks:
+      - homeassistant
+
+volumes:
+  zwift-data:
+
+networks:
+  homeassistant:
+    external: true

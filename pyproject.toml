@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "zwift-poller"
+version = "0.1.0"
+description = "Standalone Zwift API poller with Home Assistant webhook integration"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "aiohttp>=3.9.0",
+    "protobuf>=4.25.0",
+    "pydantic>=2.5.0",
+    "pydantic-settings>=2.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+]
+
+[project.scripts]
+zwift-poller = "zwift_poller.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/zwift_poller"]
