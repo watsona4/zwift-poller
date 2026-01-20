@@ -19,12 +19,12 @@ services:
       ZWIFT_TOKEN_FILE: /data/tokens.json
     volumes:
       - zwift-data:/data
-    networks:
-      - homeassistant
+    # networks:
+    #   - homeassistant
 
 volumes:
   zwift-data:
 
-networks:
-  homeassistant:
-    external: true
+# networks:
+#   homeassistant:
+#     external: true

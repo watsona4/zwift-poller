@@ -30,9 +30,27 @@ automation:
       event_type: "{{ trigger.json.event_type }}"
       data: "{{ trigger.json.data }}"
     action:
-      - event: "{{ event_type }}"
-        event_data:
-          data: "{{ data }}"
+      - choose:
+          - conditions: "{{ event_type == 'zwift_profile_update' }}"
+            sequence:
+              - event: zwift_profile_update
+                event_data:
+                  data: "{{ data }}"
+          - conditions: "{{ event_type == 'zwift_activities_update' }}"
+            sequence:
+              - event: zwift_activities_update
+                event_data:
+                  data: "{{ data }}"
+          - conditions: "{{ event_type == 'zwift_world_update' }}"
+            sequence:
+              - event: zwift_world_update
+                event_data:
+                  data: "{{ data }}"
+          - conditions: "{{ event_type == 'zwift_status_update' }}"
+            sequence:
+              - event: zwift_status_update
+                event_data:
+                  data: "{{ data }}"
 
 # Accumulated ride minutes (preserved across restarts)
 input_number:
